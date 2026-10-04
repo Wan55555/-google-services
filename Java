@@ -1,0 +1,105 @@
+Integrate Didit identity verification into my web application using the JavaScript SDK.
+
+## Setup
+Install: npm install @didit-protocol/sdk-web
+Or CDN: <script src="https://unpkg.com/@didit-protocol/sdk-web/dist/didit-sdk.umd.min.js"></script>
+
+## Integration Flow
+1. (Option A — UniLink) Use a fixed UniLink URL from the Didit Console (no backend needed)
+2. (Option B — API session) Backend creates a session via POST /v3/session/ → 201 response includes "url"
+3. Frontend calls DiditSdk.shared.startVerification({ url }) — the SDK opens a modal (or inline if embedded mode)
+4. On completion, the SDK invokes DiditSdk.shared.onComplete(result) with type "completed" | "cancelled" | "failed"
+5. Backend receives full signed decision via webhook (status.updated)
+
+## Frontend Code — Vanilla JS / TypeScript
+import { DiditSdk } from '@didit-protocol/sdk-web';
+
+DiditSdk.shared.onComplete = (result) => {
+switch (result.type) {
+case 'completed':
+  // result.session.status: "Approved" | "Pending" | "Declined"
+  console.log('Done:', result.session.sessionId, result.session.status);
+  break;
+case 'cancelled':
+  console.log('User cancelled');
+  break;
+case 'failed':
+  console.error('Failed:', result.error.type, result.error.message);
+  break;
+}
+};
+
+// Modal mode (default)
+DiditSdk.shared.startVerification({
+url: 'https://verify.didit.me/session/SESSION_TOKEN' // from backend OR UniLink
+});
+
+// Inline / embedded mode
+DiditSdk.shared.startVerification({
+url: 'https://verify.didit.me/session/SESSION_TOKEN',
+configuration: { embedded: true, embeddedContainerId: 'didit-container' }
+});
+
+## Frontend Code — React
+function VerifyButton({ userId }) {
+const [loading, setLoading] = useState(false);
+
+async function handleVerify() {
+setLoading(true);
+const res = await fetch('/api/create-session', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ user_id: userId })
+});
+const { url } = await res.json(); // OpenAPI field is named "url"
+
+const { DiditSdk } = await import('@didit-protocol/sdk-web');
+DiditSdk.shared.onComplete = (result) => {
+  if (result.type === 'completed') {
+    // update UI; final, signed result arrives on backend via webhook
+  }
+  setLoading(false);
+};
+DiditSdk.shared.startVerification({ url });
+}
+
+return <button onClick={handleVerify} disabled={loading}>Verify Identity</button>;
+}
+
+## Backend: Create Session
+POST https://verification.didit.me/v3/session/
+Headers: { "x-api-key": DIDIT_API_KEY, "Content-Type": "application/json" }
+Body: { "workflow_id": DIDIT_WORKFLOW_ID, "callback": "https://myapp.com/done", "vendor_data": userId }
+Returns 201 (all 10 fields, per OpenAPI):
+{
+"session_id": "uuid",
+"session_number": 43762,
+"session_token": "3FaJ9wLqX2Mz",   // 12-char URL-safe token; valid until the session expires
+"url": "https://verify.didit.me/session/3FaJ9wLqX2Mz",
+"vendor_data": "userId",
+"metadata": null,
+"status": "Not Started",
+"workflow_id": "uuid",
+"workflow_version": 3,
+"callback": "https://myapp.com/done"
+}
+Pass the "url" field to DiditSdk.shared.startVerification({ url }) — never build the URL by hand.
+(If the request sets "language", the URL gains a language segment: https://verify.didit.me/es/session/...)
+
+## SDK Surface (singleton — DiditSdk.shared)
+Methods:  startVerification(options), close(), destroy()
+Callbacks: onComplete(result), onStateChange(state, error?), onEvent(event)
+State enum: 'idle' | 'loading' | 'ready' | 'error'
+
+## Rate Limits
+600 session-create requests per minute per API key (falls back to bearer token, then client IP), plus a shared budget of 300 write (POST/PATCH/DELETE) requests per minute across all endpoints — the 300/min budget is exhausted first. Exceeding either returns HTTP 429 with Retry-After.
+
+## Environment Variables
+- DIDIT_API_KEY — backend only (Didit Console > API & Webhooks)
+- DIDIT_WORKFLOW_ID — backend only (Didit Console > Workflows)
+- Never expose the API key on the frontend — the session_token embedded in "url" is the only credential the SDK needs. It grants access to that one session's flow (valid until the session expires), so don't log or share it either.
+
+## Docs
+- JavaScript SDK: https://docs.didit.me/integration/web-sdks/javascript-sdk
+- Create Session API: https://docs.didit.me/sessions-api/create-session
+- Webhooks: https://docs.didit.me/integration/webhooks
